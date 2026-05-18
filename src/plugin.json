@@ -11,7 +11,7 @@
   "annotations": false,
 
   "info": {
-    "description": "MongoDB datasource",
+    "description": "MongoDB datasource for Grafana 9.x with MongoDB Atlas 7/8 support",
     "author": {
       "name": "James Osgood"
     },
@@ -20,15 +20,15 @@
       "large": "img/MongoDB_Gray_Logo_FullColor_RGB-01.jpg"
     },
     "links": [
-      {"name": "GitHub", "url": "https://github.com/grafana/simple-json-datasource"},
-      {"name": "MIT License", "url": "https://github.com/grafana/simple-json-datasource/blob/master/LICENSE"}
+      {"name": "GitHub", "url": "https://github.com/JamesOsgood/mongodb-grafana"},
+      {"name": "License", "url": "https://github.com/JamesOsgood/mongodb-grafana/blob/master/LICENSE"}
     ],
-    "version": "0.8.1",
-    "updated": "2018-08-14"
+    "version": "0.9.0",
+    "updated": "2026-05-18"
   },
 
   "dependencies": {
-    "grafanaVersion": "3.x.x",
+    "grafanaVersion": "9.x.x",
     "plugins": [ ]
   }
 }

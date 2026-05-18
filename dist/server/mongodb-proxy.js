@@ -3,7 +3,6 @@ var bodyParser = require('body-parser');
 var _ = require('lodash');
 var app = express();
 const MongoClient = require('mongodb').MongoClient;
-const assert = require('assert');
 var config = require('config');
 var Stopwatch = require("statman-stopwatch");
 var moment = require('moment')
@@ -16,22 +15,27 @@ app.all('/', function(req, res, next)
   logRequest(req.body, "/")
   setCORSHeaders(res);
 
-  MongoClient.connect(req.body.db.url, function(err, client)
-  {
-    if ( err != null )
-    {
-      res.send({ status : "error", 
-                 display_status : "Error", 
-                 message : 'MongoDB Connection Error: ' + err.message });
-    }
-    else
-    {
+  var client = null
+  MongoClient.connect(req.body.db.url)
+    .then(function(connectedClient) {
+      client = connectedClient
       res.send( { status : "success", 
                   display_status : "Success", 
                   message : 'MongoDB Connection test OK' });
-    }
-    next()
-  })
+      next()
+    })
+    .catch(function(err) {
+      res.send({ status : "error", 
+                 display_status : "Error", 
+                 message : 'MongoDB Connection Error: ' + err.message });
+      next()
+    })
+    .finally(function() {
+      if (client != null)
+      {
+        client.close()
+      }
+    })
 });
 
 // Called by template functions and to look up variables
@@ -143,8 +147,12 @@ app.all('/query', function(req, res, next)
     for ( var queryId = 0; queryId < req.body.targets.length && !error; queryId++)
     {
       tg = req.body.targets[queryId]
+      if (tg.hide || isEmptyQuery(tg.target))
+      {
+        continue
+      }
+
       queryArgs = parseQuery(tg.target, substitutions)
-      queryArgs.type = tg.type
       if (queryArgs.err != null)
       {
         queryError(requestId, queryArgs.err, next)
@@ -152,12 +160,21 @@ app.all('/query', function(req, res, next)
       }
       else
       {
+        queryArgs.type = tg.type
         // Add to the state
+        var stateId = queryStates.length
         queryStates.push( { pending : true } )
 
         // Run the query
-        runAggregateQuery( requestId, queryId, req.body, queryArgs, res, next)
+        runAggregateQuery( requestId, stateId, req.body, queryArgs, res, next)
       }
+    }
+
+    if (!error && queryStates.length == 0)
+    {
+      delete requestsPending[requestId]
+      res.json([])
+      next()
     }
   }
 );
@@ -202,11 +219,16 @@ function parseQuery(query, substitutions)
   doc = {}
   queryErrors = []
 
+  if (isEmptyQuery(query))
+  {
+    doc.err = new Error('Failed to parse query - Query must start with db.')
+    return doc
+  }
+
   query = query.trim() 
   if (query.substring(0,3) != "db.")
   {
     queryErrors.push("Query must start with db.")
-    return null
   }
 
   // Query is of the form db.<collection>.aggregate or db.<collection>.find
@@ -244,17 +266,31 @@ function parseQuery(query, substitutions)
       {
         // Wrap args in array syntax so we can check for optional options arg
         args = '[' + args + ']'
-        docs = JSON.parse(args)
-        // First Arg is pipeline
-        doc.pipeline = docs[0]
-        // If we have 2 top level args, second is agg options
-        if ( docs.length == 2 )
+        try
         {
-          doc.agg_options = docs[1]
+          docs = JSON.parse(args)
+          // First Arg is pipeline
+          doc.pipeline = docs[0]
+          if (!Array.isArray(doc.pipeline))
+          {
+            queryErrors.push("Aggregate pipeline must be an array")
+          }
+          // If we have 2 top level args, second is agg options
+          if ( docs.length == 2 )
+          {
+            doc.agg_options = docs[1]
+          }
         }
-        // Replace with substitutions
-        for ( var i = 0; i < doc.pipeline.length; i++)
+        catch(err)
         {
+          queryErrors.push("Invalid aggregate JSON: " + err.message)
+        }
+
+        // Replace with substitutions
+        if (Array.isArray(doc.pipeline))
+        {
+          for ( var i = 0; i < doc.pipeline.length; i++)
+          {
             var stage = doc.pipeline[i]
             forIn(stage, function (obj, key, value)
                 {
@@ -267,6 +303,7 @@ function parseQuery(query, substitutions)
                     }
                 })
           }
+        }
       }
       else
       {
@@ -283,19 +320,20 @@ function parseQuery(query, substitutions)
   return doc
 }
 
+function isEmptyQuery(query)
+{
+  return query == null || typeof(query) != "string" || query.trim() == ""
+}
+
 // Run an aggregate query. Must return documents of the form
 // { value : 0.34334, ts : <epoch time in seconds> }
 
 function runAggregateQuery( requestId, queryId, body, queryArgs, res, next )
 {
-  MongoClient.connect(body.db.url, function(err, client) 
-  {
-    if ( err != null )
-    {
-      queryError(requestId, err, next)
-    }
-    else
-    {
+  var client = null
+  MongoClient.connect(body.db.url)
+    .then(function(connectedClient) {
+      client = connectedClient
       const db = client.db(body.db.db);
   
       // Get the documents collection
@@ -303,39 +341,41 @@ function runAggregateQuery( requestId, queryId, body, queryArgs, res, next )
       logQuery(queryArgs.pipeline, queryArgs.agg_options)
       var stopwatch = new Stopwatch(true)
 
-      collection.aggregate(queryArgs.pipeline, queryArgs.agg_options).toArray(function(err, docs) 
-        {
-          if ( err != null )
-          {
-            client.close();
-            queryError(requestId, err, next)
-          }
-          else
-          {
-            try
-            {
-              var results = {}
-              if ( queryArgs.type == 'timeserie' )
-              {
-                results = getTimeseriesResults(docs)
-              }
-              else
-              {
-                results = getTableResults(docs)
-              }
-      
-              client.close();
-              var elapsedTimeMs = stopwatch.stop()
-              logTiming(body, elapsedTimeMs)
-              // Mark query as finished - will send back results when all queries finished
-              queryFinished(requestId, queryId, results, res, next)
-            }
-            catch(err)
-            {
-              queryError(requestId, err, next)
-            }
-          }
+      return collection.aggregate(queryArgs.pipeline, queryArgs.agg_options).toArray()
+        .then(function(docs) {
+          return { docs : docs, stopwatch : stopwatch }
         })
+    })
+    .then(function(queryResult) {
+      try
+      {
+        var results = {}
+        if ( queryArgs.type == 'timeserie' )
+        {
+          results = getTimeseriesResults(queryResult.docs)
+        }
+        else
+        {
+          results = getTableResults(queryResult.docs)
+        }
+
+        var elapsedTimeMs = queryResult.stopwatch.stop()
+        logTiming(body, elapsedTimeMs)
+        // Mark query as finished - will send back results when all queries finished
+        queryFinished(requestId, queryId, results, res, next)
+      }
+      catch(err)
+      {
+        queryError(requestId, err, next)
+      }
+    })
+    .catch(function(err) {
+      queryError(requestId, err, next)
+    })
+    .finally(function() {
+      if (client != null)
+      {
+        client.close()
       }
     })
 }
@@ -357,7 +397,7 @@ function getTableResults(docs)
         columns[propName] = 
         {
           text : propName,
-          type : "text"
+          type : getGrafanaColumnType(doc[propName])
         }
       }
     }
@@ -400,6 +440,7 @@ function getTimeseriesResults(docs)
   for ( var i = 0; i < docs.length; i++)
   {
     var doc = docs[i]
+    validateTimeseriesDoc(doc, i)
     var tg = doc.name
     var dp = null
     if (tg in results)
@@ -412,9 +453,60 @@ function getTimeseriesResults(docs)
       results[tg] = dp
     }
     
-    results[tg].datapoints.push([doc['value'], doc['ts'].getTime()])
+    results[tg].datapoints.push([doc['value'], getTimestampMs(doc['ts'])])
   }
   return results
+}
+
+function validateTimeseriesDoc(doc, index)
+{
+  if (doc.name == null || doc.value == null || doc.ts == null)
+  {
+    throw new Error("Timeserie query results must include name, value, and ts fields. Missing field in result index " + index)
+  }
+
+  if (typeof(doc.value) != "number")
+  {
+    throw new Error("Timeserie query result value must be a number at result index " + index)
+  }
+
+  getTimestampMs(doc.ts)
+}
+
+function getTimestampMs(value)
+{
+  if (value instanceof Date)
+  {
+    return value.getTime()
+  }
+
+  var date = new Date(value)
+  if (isNaN(date.getTime()))
+  {
+    throw new Error("Timeserie query result ts must be a BSON date or ISO date value")
+  }
+
+  return date.getTime()
+}
+
+function getGrafanaColumnType(value)
+{
+  if (value instanceof Date)
+  {
+    return "time"
+  }
+
+  if (typeof(value) == "number")
+  {
+    return "number"
+  }
+
+  if (typeof(value) == "boolean")
+  {
+    return "boolean"
+  }
+
+  return "text"
 }
 
 // Runs a query to support templates. Must returns documents of the form
@@ -427,14 +519,10 @@ function doTemplateQuery(requestId, queryArgs, db, res, next)
     const dbName = db.db
     
     // Use connect method to connect to the server
-    MongoClient.connect(db.url, function(err, client) 
-    {
-      if ( err != null )
-      {
-        queryError(requestId, err, next )
-      }
-      else
-      {
+    var client = null
+    MongoClient.connect(db.url)
+      .then(function(connectedClient) {
+        client = connectedClient
         // Remove request from list
         if ( requestId in requestsPending )
         {
@@ -444,22 +532,27 @@ function doTemplateQuery(requestId, queryArgs, db, res, next)
         // Get the documents collection
         const collection = db.collection(queryArgs.collection);
           
-        collection.aggregate(queryArgs.pipeline).toArray(function(err, result) 
-          {
-            assert.equal(err, null)
-    
-            output = []
-            for ( var i = 0; i < result.length; i++)
-            {
-              var doc = result[i]
-              output.push(doc["_id"])
-            }
-            res.json(output);
-            client.close()
-            next()
-          })
-      }
-    })
+        return collection.aggregate(queryArgs.pipeline).toArray()
+      })
+      .then(function(result) {
+        output = []
+        for ( var i = 0; i < result.length; i++)
+        {
+          var doc = result[i]
+          output.push(doc["_id"])
+        }
+        res.json(output);
+        next()
+      })
+      .catch(function(err) {
+        queryError(requestId, err, next )
+      })
+      .finally(function() {
+        if (client != null)
+        {
+          client.close()
+        }
+      })
   }
   else
   {

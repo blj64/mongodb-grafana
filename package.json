@@ -7,7 +7,7 @@
   "scripts": {
     "build": "./node_modules/grunt-cli/bin/grunt",
     "test": "./node_modules/grunt-cli/bin/grunt mochaTest",
-    "server": "cd dist/server && node mongodb-proxy.js"
+    "server": "cd server && node mongodb-proxy.js"
   },
   "repository": {
     "type": "git",
@@ -19,7 +19,7 @@
     "url": "https://github.com/JamesOsgood/mongodb-grafana/issues"
   },
   "engines": {
-    "node": "6.10.0"
+    "node": ">=18"
   },
   "engineStrict": true,
   "devDependencies": {
@@ -51,7 +51,7 @@
     "lodash": "^4.17.10",
     "mocha": "^5.2.0",
     "moment": "^2.22.1",
-    "mongodb": "^3.0.8",
+    "mongodb": "^6.20.0",
     "statman-stopwatch": "^2.7.0"
   },
   "homepage": "https://github.com/JamesOsgood/mongodb-grafana#readme"
