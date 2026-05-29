@@ -305,6 +305,8 @@ function parseQuery(query, substitutions)
           {
             doc.agg_options = docs[1]
           }
+
+          prepareAggregateQuery(doc)
         }
         catch(err)
         {
@@ -345,6 +347,116 @@ function parseQuery(query, substitutions)
   return doc
 }
 
+function prepareAggregateQuery(queryArgs)
+{
+  var flattenPayloadValues = queryArgs.agg_options != null && queryArgs.agg_options.flattenPayloadValues === true
+
+  if (queryArgs.agg_options != null && queryArgs.agg_options.maxDocs != null)
+  {
+    queryArgs.max_docs = parseMaxDocs(queryArgs.agg_options.maxDocs)
+    delete queryArgs.agg_options.maxDocs
+  }
+
+  if (!flattenPayloadValues)
+  {
+    cleanupAggregateOptions(queryArgs)
+    return
+  }
+
+  delete queryArgs.agg_options.flattenPayloadValues
+  if (queryArgs.max_docs == null)
+  {
+    queryArgs.max_docs = 5000
+  }
+  if (queryArgs.agg_options.allowDiskUse == null)
+  {
+    queryArgs.agg_options.allowDiskUse = true
+  }
+  cleanupAggregateOptions(queryArgs)
+
+  queryArgs.pipeline = getFlattenPayloadValuesPipeline().concat(queryArgs.pipeline)
+}
+
+function parseMaxDocs(value)
+{
+  var maxDocs = Number(value)
+  if (!Number.isFinite(maxDocs) || maxDocs <= 0)
+  {
+    throw new Error("maxDocs aggregate option must be a positive number")
+  }
+
+  return Math.floor(maxDocs)
+}
+
+function cleanupAggregateOptions(queryArgs)
+{
+  if (queryArgs.agg_options != null && Object.keys(queryArgs.agg_options).length == 0)
+  {
+    queryArgs.agg_options = null
+  }
+}
+
+function getFlattenPayloadValuesPipeline()
+{
+  return [
+    {
+      "$match": {
+        "payload.values": {
+          "$exists": true,
+          "$ne": []
+        }
+      }
+    },
+    {
+      "$unwind": "$payload.values"
+    },
+    {
+      "$addFields": {
+        "_grafana_payload_value_entries": {
+          "$objectToArray": {
+            "$ifNull": [
+              "$payload.values.data",
+              {}
+            ]
+          }
+        },
+        "_grafana_payload_value_time": {
+          "$convert": {
+            "input": "$payload.values.header.timestamp",
+            "to": "date",
+            "onError": null,
+            "onNull": null
+          }
+        }
+      }
+    },
+    {
+      "$unwind": "$_grafana_payload_value_entries"
+    },
+    {
+      "$replaceRoot": {
+        "newRoot": {
+          "device_id": "$device_id",
+          "source": "$payload.source",
+          "datatype": "$payload.datatype",
+          "imported_at": "$imported_at",
+          "time": "$_grafana_payload_value_time",
+          "ts": "$_grafana_payload_value_time",
+          "raw_timestamp": "$payload.values.header.timestamp",
+          "data_origin": "$payload.values.header.data_origin",
+          "program": "$payload.values.header.program",
+          "metric": "$_grafana_payload_value_entries.k",
+          "value": "$_grafana_payload_value_entries.v.v",
+          "value_type": {
+            "$type": "$_grafana_payload_value_entries.v.v"
+          },
+          "raw_value": "$_grafana_payload_value_entries.v"
+        }
+      }
+    }
+  ]
+}
+
 function isEmptyQuery(query)
 {
   return query == null || typeof(query) != "string" || query.trim() == ""
@@ -382,7 +494,7 @@ async function runAggregateQueryAsync( requestId, queryId, body, queryArgs, res,
     var docs = null
     try
     {
-      docs = await collection.aggregate(queryArgs.pipeline, queryArgs.agg_options).toArray()
+      docs = await getAggregateDocuments(collection, queryArgs)
     }
     catch(err)
     {
@@ -422,6 +534,27 @@ async function runAggregateQueryAsync( requestId, queryId, body, queryArgs, res,
       await client.close()
     }
   }
+}
+
+async function getAggregateDocuments(collection, queryArgs)
+{
+  var cursor = collection.aggregate(queryArgs.pipeline, queryArgs.agg_options)
+  if (queryArgs.max_docs == null)
+  {
+    return await cursor.toArray()
+  }
+
+  var docs = []
+  while (await cursor.hasNext())
+  {
+    if (docs.length >= queryArgs.max_docs)
+    {
+      throw new Error("aggregate returned more than " + queryArgs.max_docs + " documents. Add a $match/$limit stage or increase the maxDocs aggregate option.")
+    }
+    docs.push(await cursor.next())
+  }
+
+  return docs
 }
 
 function getTableResults(docs)
